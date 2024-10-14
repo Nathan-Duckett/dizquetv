@@ -1,4 +1,4 @@
-# dizqueTV 1.4.5
+# dizqueTV 1.5.3
 ![Discord](https://img.shields.io/discord/711313431457693727?logo=discord&logoColor=fff&style=flat-square) ![GitHub top language](https://img.shields.io/github/languages/top/vexorian/dizquetv?logo=github&style=flat-square) ![Docker Pulls](https://img.shields.io/docker/pulls/vexorian/dizquetv?logo=docker&logoColor=fff&style=flat-square)
 
 Create live TV channel streams from media on your Plex servers.
@@ -25,6 +25,7 @@ EPG (Guide Information) data is stored to `.dizquetv/xmltv.xml`
 - Subtitle support.
 - Auto deinterlace any Plex media not marked `"scanType": "progressive"`
 - Can be configured to completely force Direct play, if you are ready for the caveats.
+- It's up to you if the channels have a life of their own and act as if they continued playing when you weren't watching them or if you want "on-demand" channels that stop their schedules while not being watched.
 
 ## Limitations
 
@@ -74,3 +75,5 @@ npm run dev-server
 
  * Original pseudotv-Plex code was released under [MIT license (c) 2020 Dan Ferguson](https://github.com/DEFENDORe/pseudotv/blob/665e71e24ee5e93d9c9c90545addb53fdc235ff6/LICENSE)
  * dizqueTV's improvements are released under zlib license (c) 2020 Victor Hugo Soliz Kuncar
+ * FontAwesome: [https://fontawesome.com/license/free](https://archive.fo/PRqis)
+ * Bootstrap: https://github.com/twbs/bootstrap/blob/v4.4.1/LICENSE

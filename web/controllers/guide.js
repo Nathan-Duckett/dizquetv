@@ -83,7 +83,6 @@ module.exports = function ($scope, $timeout, dizquetv) {
         $scope.t1 = (new Date()).getTime();
         $scope.t1 = ($scope.t1 - $scope.t1 % MINUTE );
         $scope.t0 = $scope.t1 - $scope.before + $scope.offset;
-        $scope.title = "TV Guide";
         $scope.times = [];
 
         $scope.updateJustNow();
@@ -313,7 +312,7 @@ module.exports = function ($scope, $timeout, dizquetv) {
             ch.programs.push( {
                 duration: addDuration(b - a),
                 altTitle: altTitle,
-                showTitle: program.title,
+                showTitle: program.title,  // movie title, episode title or track title
                 subTitle: subTitle,
                 episodeTitle : episodeTitle,
                 start: hasStart,

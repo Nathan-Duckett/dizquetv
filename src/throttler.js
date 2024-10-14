@@ -7,37 +7,56 @@ function equalItems(a, b) {
     if (  (typeof(a) === 'undefined') || a.isOffline || b.isOffline ) {
         return false;
     }
-    console.log("no idea how to compare this: " + JSON.stringify(a) );
-    console.log(" with this: " + JSON.stringify(b) );
-    return true;
+    if (
+        (a.type === "loading") || (a.type === "interlude")
+        || (b.type === "loading") || (b.type === "interlude")
+    ) {
+        return (a.type === b.type);
+    }
+    if (a.type != b.type) {
+        return false;
+    }
+    if (a.type !== "program") {
+        console.log("no idea how to compare this: " + JSON.stringify(a).slice(0,100) );
+        console.log(" with this: " + JSON.stringify(b).slice(0,100) );
+    }
+    return a.title === b.title;
 
 }
 
 
 function wereThereTooManyAttempts(sessionId, lineupItem) {
-    let obj = cache[sessionId];
+
     let t1 =  (new Date()).getTime();
-    if (typeof(obj) === 'undefined') {
-        previous = cache[sessionId] = {
-            t0: t1 - constants.TOO_FREQUENT * 5
-        };
 
-    } else {
-        clearTimeout(obj.timer);
-    }
-    previous.timer = setTimeout( () => {
-            cache[sessionId].timer = null;
-            delete cache[sessionId];
-    },  constants.TOO_FREQUENT*5 );
-
+    let previous = cache[sessionId];
     let result = false;
 
-    if (previous.t0 + constants.TOO_FREQUENT >= t1) {
+    if (typeof(previous) === 'undefined') {
+        previous = cache[sessionId] = {
+            t0: t1 - constants.TOO_FREQUENT * 5,
+            lineupItem: null,
+        };
+    } else if (t1 - previous.t0 < constants.TOO_FREQUENT) {
         //certainly too frequent
         result = equalItems( previous.lineupItem, lineupItem );
     }
-    cache[sessionId].t0 = t1;
-    cache[sessionId].lineupItem = lineupItem;
+
+    cache[sessionId] = {
+        t0: t1,
+        lineupItem : lineupItem,
+    };
+
+    setTimeout( () => {
+        if (
+            (typeof(cache[sessionId]) !== 'undefined')
+            &&
+            (cache[sessionId].t0 === t1)
+        ) {
+            delete cache[sessionId];
+        }
+    }, constants.TOO_FREQUENT * 5 );
+
     return result;
     
 }

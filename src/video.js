@@ -8,11 +8,17 @@ const ProgramPlayer = require('./program-player');
 const channelCache  = require('./channel-cache')
 const wereThereTooManyAttempts = require('./throttler');
 
-module.exports = { router: video }
+module.exports = { router: video, shutdown: shutdown }
 
 let StreamCount = 0;
 
-function video( channelDB , fillerDB, db) {
+let stopPlayback = false;
+
+async function shutdown() {
+    stopPlayback = true;
+}
+
+function video( channelService, fillerDB, db, programmingService, activeChannelService, programPlayTimeDB ) {
     var router = express.Router()
 
     router.get('/setup', (req, res) => {
@@ -45,19 +51,26 @@ function video( channelDB , fillerDB, db) {
         })
     })
     // Continuously stream video to client. Leverage ffmpeg concat for piecing together videos
-    let concat = async (req, res, audioOnly) => {
+    let concat = async (req, res, audioOnly, step) => {
+        if ( typeof(step) === 'undefined') {
+            step = 0;
+        }
+        if (stopPlayback) {
+            res.status(503).send("Server is shutting down.")
+            return;
+        }
+
         // Check if channel queried is valid
         if (typeof req.query.channel === 'undefined') {
             res.status(500).send("No Channel Specified")
             return
         }
         let number = parseInt(req.query.channel, 10);
-        let channel =  await channelCache.getChannelConfig(channelDB, number);
-        if (channel.length === 0) {
+        let channel =  await channelService.getChannel(number);
+        if (channel == null) {
             res.status(500).send("Channel doesn't exist")
             return
         }
-        channel = channel[0]
 
         let ffmpegSettings = db['ffmpeg-settings'].find()[0]
 
@@ -68,9 +81,11 @@ function video( channelDB , fillerDB, db) {
             return
         }
 
-        res.writeHead(200, {
-            'Content-Type': 'video/mp2t'
-        })
+        if (step == 0) {
+            res.writeHead(200, {
+                'Content-Type': 'video/mp2t'
+            })
+        }
 
         console.log(`\r\nStream starting. Channel: ${channel.number} (${channel.name})`)
 
@@ -97,7 +112,7 @@ function video( channelDB , fillerDB, db) {
             return;
         })
 
-        ffmpeg.on('close', stop)
+        //ffmpeg.on('close', stop)
         
         res.on('close', () => { // on HTTP close, kill ffmpeg
             console.log(`\r\nStream ended. Channel: ${channel.number} (${channel.name})`);
@@ -105,13 +120,13 @@ function video( channelDB , fillerDB, db) {
         })
 
         ffmpeg.on('end', () => {
-            console.log("Video queue exhausted. Either you played 100 different clips in a row or there were technical issues that made all of the possible 100 attempts fail.")
-            stop();
+            console.log("Queue exhausted so we are appending the channel stream again to the http output.")
+            concat(req, res, audioOnly, step+1);
         })
 
         let channelNum = parseInt(req.query.channel, 10)
-        let ff = await ffmpeg.spawnConcat(`http://localhost:${process.env.PORT}/playlist?channel=${channelNum}&audioOnly=${audioOnly}`);
-        ff.pipe(res );
+        let ff = await ffmpeg.spawnConcat(`http://localhost:${process.env.PORT}/playlist?channel=${channelNum}&audioOnly=${audioOnly}&stepNumber={step}`);
+        ff.pipe(res,  { end: false}  );
     };
     router.get('/video', async(req, res) => {
         return await concat(req, res, false);
@@ -122,6 +137,11 @@ function video( channelDB , fillerDB, db) {
 
     // Stream individual video to ffmpeg concat above. This is used by the server, NOT the client
     let streamFunction = async (req, res, t0, allowSkip) => {
+        if (stopPlayback) {
+            res.status(503).send("Server is shutting down.")
+            return;
+        }
+
         // Check if channel queried is valid
         res.on("error", (e) => {
             console.error("There was an unexpected error in stream.", e);
@@ -136,9 +156,9 @@ function video( channelDB , fillerDB, db) {
         let session = parseInt(req.query.session);
         let m3u8 = (req.query.m3u8 === '1');
         let number = parseInt(req.query.channel);
-        let channel = await channelCache.getChannelConfig(channelDB, number);
+        let channel = await channelService.getChannel( number);
 
-        if (channel.length === 0) {
+        if (channel == null) {
             res.status(404).send("Channel doesn't exist")
             return
         }
@@ -151,7 +171,8 @@ function video( channelDB , fillerDB, db) {
         if ( (typeof req.query.first !== 'undefined') && (req.query.first=='1') ) {
             isFirst = true;
         }
-        channel = channel[0]
+
+        let isBetween = ( (typeof req.query.between !== 'undefined') && (req.query.between=='1') );
 
         let ffmpegSettings = db['ffmpeg-settings'].find()[0]
 
@@ -162,34 +183,62 @@ function video( channelDB , fillerDB, db) {
             return
         }
 
+        if (ffmpegSettings.disablePreludes === true) {
+            //disable the preludes
+            isBetween = false;
+        }
+
 
 
 
         // Get video lineup (array of video urls with calculated start times and durations.)
-      let lineupItem = channelCache.getCurrentLineupItem( channel.number, t0);
+
       let prog = null;
       let brandChannel = channel;
       let redirectChannels = [];
       let upperBounds = [];
 
+      const GAP_DURATION = constants.GAP_DURATION;
       if (isLoading) {
           lineupItem = {
              type: 'loading',
-             streamDuration: 40,
-             duration: 40,
+             title: "Loading Screen",
+             noRealTime: true,
+             streamDuration: GAP_DURATION,
+             duration: GAP_DURATION,
+             redirectChannels: [channel],
              start: 0,
           };
-      } else if (lineupItem == null) {
-        prog = helperFuncs.getCurrentProgramAndTimeElapsed(t0, channel);
-        
+      } else if (isBetween) {
+        lineupItem = {
+            type: 'interlude',
+            title: "Interlude Screen",
+            noRealTime: true,
+            streamDuration: GAP_DURATION,
+            duration: GAP_DURATION,
+            redirectChannels: [channel],
+            start: 0,
+        };
+      } else {
+        lineupItem = channelCache.getCurrentLineupItem( channel.number, t0);
+      }
+      if (lineupItem != null) {
+          redirectChannels = lineupItem.redirectChannels;
+          upperBounds = lineupItem.upperBounds;
+          brandChannel = redirectChannels[ redirectChannels.length -1];
+      } else {
+        prog = programmingService.getCurrentProgramAndTimeElapsed(t0, channel);
+        activeChannelService.peekChannel(t0, channel.number);
+
         while (true) {
-            redirectChannels.push( brandChannel );
+            redirectChannels.push(  helperFuncs.generateChannelContext(brandChannel) );
             upperBounds.push( prog.program.duration - prog.timeElapsed );
 
             if ( !(prog.program.isOffline) || (prog.program.type != 'redirect') ) {
                 break;
             }
-            channelCache.recordPlayback( brandChannel.number, t0, {
+            channelCache.recordPlayback(programPlayTimeDB,
+                brandChannel.number, t0, {
                 /*type: 'offline',*/
                 title: 'Error',
                 err: Error("Recursive channel redirect found"),
@@ -200,9 +249,9 @@ function video( channelDB , fillerDB, db) {
 
 
             let newChannelNumber= prog.program.channel;
-            let newChannel = await channelCache.getChannelConfig(channelDB, newChannelNumber);
+            let newChannel = await channelService.getChannel(newChannelNumber);
 
-            if (newChannel.length == 0) {
+            if (newChannel == null) {
                 let err = Error("Invalid redirect to a channel that doesn't exist");
                 console.error("Invalid redirect to channel that doesn't exist.", err);
                 prog = {
@@ -215,14 +264,14 @@ function video( channelDB , fillerDB, db) {
                 }
                 continue;
             }
-            newChannel = newChannel[0];
             brandChannel = newChannel;
             lineupItem = channelCache.getCurrentLineupItem( newChannel.number, t0);
             if (lineupItem != null) {
                 lineupItem = JSON.parse( JSON.stringify(lineupItem)) ;
                 break;
             } else {
-                prog = helperFuncs.getCurrentProgramAndTimeElapsed(t0, newChannel);
+                prog = programmingService.getCurrentProgramAndTimeElapsed(t0, newChannel);
+                activeChannelService.peekChannel(t0, newChannel.number);
             }
         }
       }
@@ -255,11 +304,20 @@ function video( channelDB , fillerDB, db) {
             throw "No video to play, this means there's a serious unexpected bug or the channel db is corrupted."
         }
         let fillers = await fillerDB.getFillersFromChannel(brandChannel);
-        let lineup = helperFuncs.createLineup(prog, brandChannel, fillers, isFirst)
-        lineupItem = lineup.shift();
+        try {
+            let lineup = helperFuncs.createLineup(programPlayTimeDB, prog, brandChannel, fillers, isFirst)
+            lineupItem = lineup.shift();
+        } catch (err) {
+            console.log("Error when attempting to pick video: " +err.stack);
+            lineupItem = {
+                isOffline: true,
+                err: err,
+                duration : 60000,
+            };
+        }
       }
 
-        if ( !isLoading && (lineupItem != null) ) {
+        if ( !isBetween && !isLoading && (lineupItem != null) ) {
             let upperBound = 1000000000;
             let beginningOffset = 0;
             if (typeof(lineupItem.beginningOffset) !== 'undefined') {
@@ -268,6 +326,8 @@ function video( channelDB , fillerDB, db) {
             //adjust upper bounds and record playbacks
             for (let i = redirectChannels.length-1; i >= 0; i--) {
                 lineupItem = JSON.parse( JSON.stringify(lineupItem ));
+                lineupItem.redirectChannels = redirectChannels;
+                lineupItem.upperBounds = upperBounds;
                 let u = upperBounds[i] + beginningOffset;
                 if (typeof(u) !== 'undefined') {
                     let u2 = upperBound;
@@ -277,10 +337,13 @@ function video( channelDB , fillerDB, db) {
                     lineupItem.streamDuration = Math.min(u2, u);
                     upperBound = lineupItem.streamDuration;
                 }
-                channelCache.recordPlayback( redirectChannels[i].number, t0, lineupItem );
+                channelCache.recordPlayback( programPlayTimeDB, redirectChannels[i].number, t0, lineupItem );
             }
         }
  
+        let t2 = (new Date()).getTime();
+        console.log( `Decision Latency: (${t2-t0})ms` );
+
 
         console.log("=========================================================");
         console.log("! Start playback");
@@ -296,10 +359,11 @@ function video( channelDB , fillerDB, db) {
         }
         console.log("=========================================================");
 
-        if (! isLoading) {
-            channelCache.recordPlayback(channel.number, t0, lineupItem);
+        if (! isLoading && ! isBetween) {
+            channelCache.recordPlayback(programPlayTimeDB, channel.number, t0, lineupItem);
         }
         if (wereThereTooManyAttempts(session, lineupItem)) {
+            console.error("There are too many attempts to play the same item in a short period of time, playing the error stream instead.");
             lineupItem = {
                 isOffline: true,
                 err: Error("Too many attempts, throttling.."),
@@ -334,8 +398,14 @@ function video( channelDB , fillerDB, db) {
             'Content-Type': 'video/mp2t'
         });
 
+        shieldActiveChannels(redirectChannels, t0, constants.START_CHANNEL_GRACE_PERIOD);
+
+        let t1;
+
         try {
             playerObj = await player.play(res);
+            t1 = (new Date()).getTime();
+            console.log( `Player Latency: (${t1-t0})ms` );
         } catch (err) {
             console.log("Error when attempting to play video: " +err.stack);
             try {
@@ -347,7 +417,59 @@ function video( channelDB , fillerDB, db) {
             return;
         }
 
+        if (! isLoading) {
+            //setup end event to mark the channel as not playing anymore
+            let t0 = new Date().getTime();
+            let b = 0;
+            let stopDetected = false;
+            if (typeof(lineupItem.beginningOffset) !== 'undefined') {
+                b = lineupItem.beginningOffset;
+                t0 -= b;
+            }
 
+            // we have to do it for every single redirected channel...
+
+            for (let i = redirectChannels.length-1; i >= 0; i--) {
+                activeChannelService.registerChannelActive(t0,  redirectChannels[i].number);
+            }
+            let listener = (data) => {
+                if (data.ignoreOnDemand) {
+                    console.log("Ignore channel update because it is from on-demand service");
+                    return;
+                }
+                let shouldStop = false;
+                try {
+                    for (let i = 0; i < redirectChannels.length; i++) {
+                        if (redirectChannels[i].number == data.channelNumber) {
+                            shouldStop = true;
+                        }
+                    }
+                    if (shouldStop) {
+                        console.log("Playing channel has received an update.");
+                        shieldActiveChannels( redirectChannels, t0, constants.CHANNEL_STOP_SHIELD )
+                        setTimeout(stop, 100);
+                    }
+                } catch (error) {
+                    console.err("Unexpected error when processing channel change during playback", error);
+                }
+                        
+            };
+            channelService.on("channel-update", listener);
+
+            let oldStop = stop;
+            stop = () => {
+                channelService.removeListener("channel-update", listener);
+                if (!stopDetected) {
+                    stopDetected = true;
+                    let t1 = new Date().getTime();
+                    t1 =  Math.max( t0 + 1, t1  - constants.FORGETFULNESS_BUFFER - b );
+                    for (let i = redirectChannels.length-1; i >= 0; i--) {
+                        activeChannelService.registerChannelStopped(t1,  redirectChannels[i].number);
+                    }
+                }
+                oldStop();
+            };
+        }
         let stream = playerObj;
 
 
@@ -356,9 +478,13 @@ function video( channelDB , fillerDB, db) {
 
 
         stream.on("end", () => {
+            let t2 = (new Date()).getTime();
+            console.log("Played video for: " + (t2 - t1) + " ms");
             stop();
         });
         res.on("close", () => {
+            let t2 = (new Date()).getTime();
+            console.log("Played video for: " + (t2 - t1) + " ms");
             console.log("Client Closed");
             stop();
         });
@@ -371,6 +497,12 @@ function video( channelDB , fillerDB, db) {
 
 
     router.get('/m3u8',  async (req, res) => {
+        if (stopPlayback) {
+            res.status(503).send("Server is shutting down.")
+            return;
+        }
+
+
         let sessionId = StreamCount++;
 
         //res.type('application/vnd.apple.mpegurl')
@@ -383,8 +515,8 @@ function video( channelDB , fillerDB, db) {
         }
 
         let channelNum = parseInt(req.query.channel, 10)
-        let channel =  await channelCache.getChannelConfig(channelDB, channelNum );
-        if (channel.length === 0) {
+        let channel =  await channelService.getChannel(channelNum );
+        if (channel == null) {
             res.status(500).send("Channel doesn't exist")
             return
         }
@@ -419,6 +551,12 @@ function video( channelDB , fillerDB, db) {
         res.send(data)
     })
     router.get('/playlist', async (req, res) => {
+        if (stopPlayback) {
+            res.status(503).send("Server is shutting down.")
+            return;
+        }
+
+
         res.type('text')
 
         // Check if channel queried is valid
@@ -427,9 +565,13 @@ function video( channelDB , fillerDB, db) {
             return
         }
 
+        let stepNumber = parseInt(req.query.stepNumber, 10)
+        if (isNaN(stepNumber)) {
+            stepNumber = 0;
+        }
         let channelNum = parseInt(req.query.channel, 10)
-        let channel = await channelCache.getChannelConfig(channelDB, channelNum );
-        if (channel.length === 0) {
+        let channel = await channelService.getChannel(channelNum );
+        if (channel == null) {
             res.status(500).send("Channel doesn't exist")
             return
         }
@@ -445,29 +587,59 @@ function video( channelDB , fillerDB, db) {
         let sessionId = StreamCount++;
         let audioOnly = ("true" == req.query.audioOnly);
 
-        if (
-               (ffmpegSettings.enableFFMPEGTranscoding === true)
+        let transcodingEnabled = (ffmpegSettings.enableFFMPEGTranscoding === true)
             && (ffmpegSettings.normalizeVideoCodec === true)
             && (ffmpegSettings.normalizeAudioCodec === true)
             && (ffmpegSettings.normalizeResolution === true)
-            && (ffmpegSettings.normalizeAudio === true)
+            && (ffmpegSettings.normalizeAudio === true);
+
+        if (
+               transcodingEnabled
             && (audioOnly !== true) /* loading screen is pointless in audio mode (also for some reason it makes it fail when codec is aac, and I can't figure out why) */
+            && (stepNumber == 0)
         ) {
             //loading screen
             data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&first=0&session=${sessionId}&audioOnly=${audioOnly}'\n`;
         }
-        data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&first=1&session=${sessionId}&audioOnly=${audioOnly}'\n`
-        for (var i = 0; i < maxStreamsToPlayInARow - 1; i++) {
+        let remaining = maxStreamsToPlayInARow;
+        if (stepNumber == 0) {
+            data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&first=1&session=${sessionId}&audioOnly=${audioOnly}'\n`
+
+            if (transcodingEnabled && (audioOnly !== true)) {
+                data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&between=1&session=${sessionId}&audioOnly=${audioOnly}'\n`;
+            }
+            remaining--;
+        }
+
+        for (var i = 0; i < remaining; i++) {
             data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&session=${sessionId}&audioOnly=${audioOnly}'\n`
+            if (transcodingEnabled && (audioOnly !== true) ) {
+                data += `file 'http://localhost:${process.env.PORT}/stream?channel=${channelNum}&between=1&session=${sessionId}&audioOnly=${audioOnly}'\n`
+            }
         }
 
         res.send(data)
     })
 
+    let shieldActiveChannels = (channelList, t0, timeout) => {
+        // because of channel redirects, it's possible that multiple channels
+        // are being played at once. Mark all of them as being played
+        // this is a grave period of 30
+        //mark all channels being played as active:
+        for (let i = channelList.length-1; i >= 0; i--) {
+            activeChannelService.registerChannelActive(t0,  channelList[i].number);
+        }
+        setTimeout( () => {
+            for (let i = channelList.length-1; i >= 0; i--) {
+                activeChannelService.registerChannelStopped(t0,  channelList[i].number);
+            }
+        }, timeout );
+    }
+
 
     let mediaPlayer = async(channelNum, path, req, res) => {
-        let channel = await channelCache.getChannelConfig(channelDB, channelNum );
-        if (channel.length === 0) {
+        let channel = await channelService.getChannel(channelNum );
+        if (channel === null) {
             res.status(404).send("Channel not found.");
             return;
         }

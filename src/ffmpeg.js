@@ -198,8 +198,9 @@ class FFMPEG extends events.EventEmitter {
                 iW = this.wantedW;
                 iH = this.wantedH;
 
+                let durstr = `duration=${streamStats.duration}ms`;
+
               if (this.audioOnly !== true) {
-                ffmpegArgs.push("-r" , "24");
                 let pic = null;
 
                 //does an image to play exist?
@@ -216,6 +217,11 @@ class FFMPEG extends events.EventEmitter {
                 }
 
                 if (pic != null) {
+                    if (this.opts.noRealTime === true) {
+                        ffmpegArgs.push("-r" , "60");
+                    } else {
+                        ffmpegArgs.push("-r" , "24");
+                    }
                     ffmpegArgs.push(
                         '-i', pic,
                     );
@@ -230,11 +236,17 @@ class FFMPEG extends events.EventEmitter {
                     videoComplex = `;[${inputFiles++}:0]format=yuv420p[formatted]`;
                     videoComplex +=`;[formatted]scale=w=${iW}:h=${iH}:force_original_aspect_ratio=1[scaled]`;
                     videoComplex += `;[scaled]pad=${iW}:${iH}:(ow-iw)/2:(oh-ih)/2[padded]`;
-                    videoComplex += `;[padded]loop=loop=-1:size=1:start=0[looped]`;
-                    videoComplex +=`;[looped]realtime[videox]`;
+                    videoComplex += `;[padded]loop=loop=-1:size=1:start=0`;
+                    if (this.opts.noRealTime !== true) {
+                        videoComplex +=`[looped];[looped]realtime[videox]`;
+                    } else {
+                        videoComplex +=`[videox]`
+                    }
                     //this tune apparently makes the video compress better
                     // when it is the same image
                     stillImage = true;
+                    this.volumePercent = Math.min(70, this.volumePercent);
+
                 } else if (this.opts.errorScreen == 'static') {
                     ffmpegArgs.push(
                         '-f', 'lavfi',
@@ -269,7 +281,7 @@ class FFMPEG extends events.EventEmitter {
                     videoComplex = `;realtime[videox]`;
                 }
               }
-                let durstr = `duration=${streamStats.duration}ms`;
+
               if (typeof(streamUrl.errorTitle) !== 'undefined') {
                 //silent
                 audioComplex = `;aevalsrc=0:${durstr}[audioy]`;
@@ -471,7 +483,8 @@ class FFMPEG extends events.EventEmitter {
                     `-c:v`, (transcodeVideo ? this.opts.videoEncoder : 'copy'),
                     `-sc_threshold`, `1000000000`,
                 );
-                if (stillImage) {
+                // do not use -tune stillimage for nv
+                if (stillImage && ! this.opts.videoEncoder.toLowerCase().includes("nv") ) {
                     ffmpegArgs.push('-tune', 'stillimage');
                 }
             }
@@ -482,10 +495,17 @@ class FFMPEG extends events.EventEmitter {
             if ( transcodeVideo && (this.audioOnly !== true) ) {
                 // add the video encoder flags
                 ffmpegArgs.push(
-                            `-b:v`, `${this.opts.videoBitrate}k`,
+                            '-crf', '22',
                             `-maxrate:v`, `${this.opts.videoBitrate}k`,
                             `-bufsize:v`, `${this.opts.videoBufSize}k`
                 );
+                if (this.opts.videoEncoder.toLowerCase() === "mpeg2video") {
+                    // This makes message "impossible bitrate constraints, this will fail" appear but nothing actually fails and it really looks like b:v is the only way to make the video look good when using mpeg2video
+                    ffmpegArgs.push(
+                        `-qscale:v`, `1`,
+                        '-b:v', `${this.opts.videoBitrate}k`
+                    );
+                }
             }
             if ( transcodeAudio ) {
                 // add the audio encoder flags
@@ -549,6 +569,7 @@ class FFMPEG extends events.EventEmitter {
         if (this.hasBeenKilled) {
             return ;
         }
+        //console.log(this.ffmpegPath + " " + ffmpegArgs.join(" ") );
         this.ffmpeg = spawn(this.ffmpegPath, ffmpegArgs, { stdio: ['ignore', 'pipe', (doLogs?process.stderr:"ignore") ] } );
         if (this.hasBeenKilled) {
             console.log("Send SIGKILL to ffmpeg");
